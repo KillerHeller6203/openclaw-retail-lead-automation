@@ -1,0 +1,66 @@
+================================================================
+  LOOM WALKTHROUGH — RETAIL_INDIA_OUTREACH_PIPELINE v2.0
+  Production-Grade Automation System
+================================================================
+
+Submitted by  : [Your Full Name]
+Submission Date: [Date]
+
+----------------------------------------------------------------
+LOOM VIDEO LINK
+----------------------------------------------------------------
+
+  Primary URL  →  [PASTE YOUR LOOM URL HERE]
+  Backup URL   →  [Google Drive / YouTube unlisted — optional]
+  Duration     :  [e.g. 11 minutes 42 seconds]
+  Access       :  Anyone with the link — no password required
+
+----------------------------------------------------------------
+SECTION-BY-SECTION BREAKDOWN
+----------------------------------------------------------------
+
+  00:00 – 01:00   System Overview
+                  What the pipeline does, business rationale,
+                  tools used, v2.0 improvements over v1.0
+
+  01:00 – 02:30   Folder Structure Walkthrough
+                  6 subfolders explained, naming conventions,
+                  what each file contains
+
+  02:30 – 04:30   OpenClaw Canvas — Full Workflow (9 nodes)
+                  Node graph, data flow direction, fork-merge
+                  pattern at N04, routing logic at N07
+
+  04:30 – 06:30   Node Deep-Dives (most important nodes)
+                  N02: Apollo API config + filter params
+                  N04: Enrichment loop (LinkedIn + news + funding)
+                  N05: LLM enrichment — prompt, JSON mode, temp
+                  N07: Validation layer — all 4 checks live
+
+  06:30 – 07:30   LLM Prompt Architecture
+                  Show enrichment prompt v2 — rules, rubric,
+                  self-check. Show message prompt — banned phrases.
+
+  07:30 – 09:00   Live Run / Execution Log
+                  Run workflow or show completed execution log.
+                  Walk through 2–3 leads: raw signal → hook → message.
+                  Show error log entries (N04A retry, N06 re-prompt).
+
+  09:00 – 10:00   XLSX Output Review
+                  Open retail_india_outreach_leads_v2.xlsx.
+                  Highlight: hook_confidence_score colour coding,
+                  hallucination_check column, validation flags.
+
+  10:00 – 11:42   Scalability & Interview Defence
+                  Explain Tier 0 → Tier 5 progression.
+                  Answer: how do you avoid LinkedIn bans at scale?
+                  Answer: what happens when the LLM hallucinates?
+                  Answer: why GPT-4o and not a cheaper model?
+
+----------------------------------------------------------------
+CONTACT
+----------------------------------------------------------------
+
+  If the link is inaccessible: [your@email.com]
+
+================================================================

@@ -1,0 +1,290 @@
+{
+  "_meta": {
+    "pipeline_id": "RETAIL_INDIA_OUTREACH_PIPELINE",
+    "version": "2.0.0",
+    "environment": "production",
+    "created_at": "2024-12-02T00:00:00Z",
+    "compatible_with": ["OpenClaw", "n8n (queue mode)", "Zapier (limited)"],
+    "author": "[Your Name]",
+    "description": "Production-grade 9-node pipeline for B2B retail lead enrichment and personalised LinkedIn message generation. Includes retry logic, error handling, rate limiting, and quality validation."
+  },
+
+  "global_config": {
+    "target_industry": "Retail",
+    "target_location": "India",
+    "target_titles": ["Director", "VP", "Vice President", "Head of", "CXO", "Chief", "Founder", "Co-Founder", "President"],
+    "exclude_titles": ["Recruiter", "Talent Acquisition", "HR Manager", "Staffing", "Head of People"],
+    "batch_size_default": 10,
+    "max_message_characters": 300,
+    "min_hook_confidence": 0.50,
+    "human_review_threshold": 0.70,
+    "run_schedule_cron": "0 9 * * 1",
+    "run_timezone": "Asia/Kolkata",
+    "no_scrape_window": { "start": "23:00", "end": "06:00", "tz": "Asia/Kolkata" }
+  },
+
+  "nodes": {
+    "N01_Trigger": {
+      "type": "Scheduled Trigger",
+      "config": {
+        "cron": "0 9 * * 1",
+        "manual_override": true,
+        "input_params": ["batch_size", "target_industry", "target_location"]
+      }
+    },
+
+    "N02_Lead_Discovery": {
+      "type": "HTTP Request — Apollo API",
+      "config": {
+        "method": "POST",
+        "url": "https://api.apollo.io/v1/mixed_people/search",
+        "auth": { "type": "header", "key": "x-api-key", "value": "{{env.APOLLO_API_KEY}}" },
+        "body": {
+          "person_titles": "{{global_config.target_titles}}",
+          "person_locations": ["India"],
+          "organization_industry_tag_ids": ["retail"],
+          "per_page": 25,
+          "page": 1
+        },
+        "timeout_ms": 15000,
+        "retry": {
+          "max_attempts": 3,
+          "backoff_strategy": "exponential",
+          "backoff_delays_ms": [30000, 60000, 120000],
+          "retry_on_status": [429, 500, 502, 503]
+        },
+        "fallback_chain": ["Hunter.io", "Apollo_page_2"]
+      },
+      "error_handling": {
+        "401": { "action": "re_auth_from_secrets", "alert": true },
+        "429": { "action": "retry_with_backoff", "alert_after_attempt": 2 },
+        "fatal": { "action": "abort_run", "alert": true, "write_error_log": true }
+      },
+      "output": "raw_leads[]"
+    },
+
+    "N03_Filter_And_Dedupe": {
+      "type": "Code Node (JavaScript)",
+      "config": {
+        "exclude_title_keywords": ["recruiter", "talent acquisition", "hr manager", "staffing", "head of people", "talent partner"],
+        "require_title_keywords": "{{global_config.target_titles_lowercase}}",
+        "require_location_keyword": "india",
+        "dedupe_field": "linkedin_url",
+        "dedupe_store": "airtable_processed_urls",
+        "output_cap": "{{global_config.batch_size_default}}",
+        "discard_log": true
+      },
+      "output": "qualified_leads[]"
+    },
+
+    "N04_Enrichment_Loop": {
+      "type": "Loop with Parallel Sub-nodes",
+      "concurrency": 1,
+      "inter_lead_delay_ms": "randomized_8000_15000",
+      "sub_nodes": {
+        "N04A_LinkedIn_Scraper": {
+          "tool": "Apify — LinkedIn Profile Scraper",
+          "config": {
+            "actor_id": "apify/linkedin-profile-scraper",
+            "input": { "profileUrls": ["{{lead.linkedin_url}}"] },
+            "extract_fields": ["recent_posts_text", "recent_posts_dates", "recent_job_change", "skills", "connections"],
+            "rate_limit": { "per_day": 80, "counter_store": "redis_linkedin_counter", "ttl_hours": 24 },
+            "proxy": { "type": "residential", "provider": "brightdata" },
+            "user_agent_rotation": true,
+            "stealth_mode": true,
+            "timeout_ms": 30000
+          },
+          "retry": {
+            "max_attempts": 3,
+            "backoff_delays_ms": [30000, 90000, 180000],
+            "on_2nd_retry": "rotate_linkedin_session",
+            "session_store": "airtable_linkedin_sessions"
+          },
+          "error_handling": {
+            "403": { "action": "refresh_cookie_then_retry", "skip_signal_on_failure": true },
+            "404": { "action": "skip_signal", "log": true },
+            "429": { "action": "retry_with_backoff_and_rotate_session" }
+          }
+        },
+
+        "N04B_Company_News": {
+          "tool": "NewsAPI / Bing News fallback",
+          "config": {
+            "primary_api": "NewsAPI",
+            "primary_url": "https://newsapi.org/v2/everything",
+            "query_template": "{{lead.company_name}} India",
+            "date_range_days": 90,
+            "language": "en",
+            "sort_by": "relevancy",
+            "cache": { "store": "redis_news_cache", "key_template": "news_{{lead.company_name}}", "ttl_hours": 48 },
+            "fallback_api": "Bing News Search",
+            "fallback_url": "https://api.bing.microsoft.com/v7.0/news/search"
+          },
+          "retry": { "max_attempts": 1, "on_quota_exceeded": "switch_to_fallback" },
+          "error_handling": {
+            "quota_exceeded": { "action": "switch_to_bing_fallback" },
+            "empty_results": { "action": "set_field_NO_DATA", "log": false }
+          }
+        },
+
+        "N04C_Funding_Signal": {
+          "tool": "Crunchbase API",
+          "config": {
+            "url": "https://api.crunchbase.com/api/v4/entities/organizations/{{lead.company_slug}}",
+            "auth": { "type": "query_param", "key": "user_key", "value": "{{env.CRUNCHBASE_KEY}}" },
+            "extract_fields": ["last_funding_type", "last_funding_amount", "last_funding_date", "short_description"]
+          },
+          "retry": { "max_attempts": 2, "backoff_delays_ms": [20000, 40000] },
+          "error_handling": {
+            "429": { "action": "retry_with_backoff" },
+            "404": { "action": "skip_signal_set_NO_DATA" }
+          }
+        }
+      },
+      "merge_strategy": "combine_all_fields_into_enriched_lead",
+      "fallback_on_all_signals_empty": "use_company_name_and_title_only",
+      "output": "enriched_leads[]"
+    },
+
+    "N05_LLM_Enrichment": {
+      "type": "OpenAI API Node",
+      "config": {
+        "model": "gpt-4o",
+        "temperature": 0.3,
+        "max_tokens": 800,
+        "response_format": { "type": "json_object" },
+        "prompt_template_file": "llm_enrichment_prompt_v2.txt",
+        "timeout_ms": 30000
+      },
+      "output_schema": {
+        "hook_text": "string",
+        "data_source": "enum[linkedin_post|company_news|funding|job_change|hiring_trend|company_milestone]",
+        "signal_date": "string",
+        "signal_raw_excerpt": "string",
+        "personalization_rationale": "string",
+        "hook_confidence_score": "float[0.00-1.00]",
+        "hallucination_risk": "enum[LOW|MEDIUM|HIGH]"
+      },
+      "retry": {
+        "max_attempts": 2,
+        "on_json_parse_error": "strip_backticks_and_retry",
+        "on_token_limit": "truncate_signal_raw_excerpt_to_500_chars"
+      },
+      "post_processing": {
+        "sanitize_backtick_fences": true,
+        "validate_confidence_range": true,
+        "flag_if_hallucination_risk_HIGH": true
+      }
+    },
+
+    "N06_LLM_Message_Generation": {
+      "type": "OpenAI API Node",
+      "config": {
+        "model": "gpt-4o",
+        "temperature": 0.5,
+        "max_tokens": 300,
+        "response_format": { "type": "json_object" },
+        "prompt_template_file": "llm_message_generation_prompt_v2.txt",
+        "timeout_ms": 30000
+      },
+      "output_schema": {
+        "linkedin_message": "string",
+        "char_count": "integer",
+        "word_count": "integer",
+        "truncated": "boolean"
+      },
+      "retry": {
+        "max_attempts": 2,
+        "on_char_count_over_300": "re_prompt_with_current_draft_and_count",
+        "on_final_retry_still_over_300": "truncate_at_word_boundary_flag_TRUNCATED"
+      }
+    },
+
+    "N07_Validation_Layer": {
+      "type": "Code Node (JavaScript)",
+      "checks": [
+        {
+          "id": "CHAR_LIMIT",
+          "logic": "message.length <= 300",
+          "fail_action": "re_prompt_N06",
+          "max_reprompts": 2,
+          "final_fail_action": "truncate_and_flag"
+        },
+        {
+          "id": "GENERIC_PHRASE",
+          "banned_phrases": [
+            "I admire", "your leadership", "your journey", "synergies",
+            "reaching out", "hope this finds you", "impressive work",
+            "great leader", "love to connect", "mutual benefit",
+            "touch base", "circle back", "pick your brain", "your success"
+          ],
+          "fail_action": "re_prompt_N06_with_flagged_phrases",
+          "max_reprompts": 1,
+          "final_fail_action": "route_to_HUMAN_REVIEW"
+        },
+        {
+          "id": "CONFIDENCE_THRESHOLD",
+          "logic": "hook_confidence_score >= 0.70",
+          "warn_range": [0.50, 0.69],
+          "warn_action": "route_to_HUMAN_REVIEW_with_flag_MEDIUM_CONFIDENCE",
+          "fail_threshold": 0.50,
+          "fail_action": "route_to_HUMAN_REVIEW_with_flag_LOW_CONFIDENCE"
+        },
+        {
+          "id": "HALLUCINATION_GUARD",
+          "logic": "keyword_intersection(hook_text, signal_raw_excerpt) >= 0.60",
+          "fail_action": "set_hallucination_check_FALSE_route_to_HUMAN_REVIEW"
+        }
+      ],
+      "routing": {
+        "all_pass": "N08_CSV_Export",
+        "any_fail_after_retries": "Human_Review_Queue_Airtable"
+      }
+    },
+
+    "N08_CSV_XLSX_Export": {
+      "type": "File Writer",
+      "config": {
+        "csv_output": "01_Lead_Data/retail_india_outreach_leads_v2.csv",
+        "xlsx_output": "01_Lead_Data/retail_india_outreach_leads_v2.xlsx",
+        "schema_version": "2.0",
+        "columns": [
+          "lead_id","full_name","first_name","current_title","company_name","linkedin_url",
+          "location","signal_source","signal_type","signal_date","signal_raw_excerpt",
+          "hook_confidence_score","hook_text","personalization_rationale","linkedin_message",
+          "message_char_count","message_word_count","validation_status","validation_flag",
+          "char_limit_pass","generic_phrase_pass","hallucination_check","scrape_attempt_count",
+          "processed_at","batch_id"
+        ],
+        "error_handling": {
+          "write_permission_error": { "action": "retry_3x_then_write_to_tmp", "alert": true }
+        }
+      }
+    },
+
+    "N09_Queue_Manager": {
+      "type": "Rate Limiter + Logger + Notifier",
+      "config": {
+        "dedup_store": { "type": "airtable", "table": "processed_leads", "ttl_days": 30 },
+        "rate_counter": { "type": "redis", "key": "linkedin_daily_count", "ttl_hours": 24 },
+        "error_log_output": "06_Error_Logs/error_log_{{batch_id}}.csv",
+        "run_metrics_output": "06_Error_Logs/run_metrics_{{batch_id}}.json",
+        "slack_webhook": "{{env.SLACK_WEBHOOK_URL}}",
+        "slack_message_template": "✅ BATCH_{{batch_id}} complete: {{approved}}/{{total}} leads approved | {{errors}} errors auto-resolved | Avg confidence: {{avg_confidence}} | Runtime: {{runtime_min}}m",
+        "retry_failed_leads_after_hours": 24,
+        "write_error_handling": {
+          "airtable_timeout": { "action": "retry_3x_exp_backoff", "fallback": "write_to_local_backup_file" }
+        }
+      }
+    }
+  },
+
+  "scalability_tiers": {
+    "tier_0_pilot": { "batch_size": 10, "concurrency": 1, "linkedin_accounts": 1, "infrastructure": "OpenClaw only" },
+    "tier_1_small":  { "batch_size": 25, "concurrency": 3, "linkedin_accounts": 1, "infrastructure": "+ Airtable, Slack alerts, retry logic" },
+    "tier_2_medium": { "batch_size": 50, "concurrency": 5, "linkedin_accounts": 1, "infrastructure": "+ Redis rate counter, proxy rotation" },
+    "tier_3_large":  { "batch_size": 100,"concurrency": 8, "linkedin_accounts": 2, "infrastructure": "+ Redis queue, dead-letter queue, worker pool" },
+    "tier_4_xlarge": { "batch_size": 250,"concurrency": 12,"linkedin_accounts": 3, "infrastructure": "+ LLM batching (5/call), company news caching" },
+    "tier_5_scale":  { "batch_size": 500,"concurrency": 16,"linkedin_accounts": 5, "infrastructure": "+ n8n queue mode, S3, DataDog, SLA alerting" }
+  }
+}
