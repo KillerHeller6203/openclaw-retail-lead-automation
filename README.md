@@ -144,6 +144,3 @@ OpenClaw_RetailLeads_Automation_v2/
 
 ---
 
-## 📬 Contact
-
-[your.email@domain.com]
