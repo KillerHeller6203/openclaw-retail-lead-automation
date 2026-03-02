@@ -5,8 +5,7 @@
 |---|---|
 | **Pipeline ID** | `RETAIL_INDIA_OUTREACH_PIPELINE` |
 | **Version** | 2.0.0 (Production) |
-| **Submitted by** | [Your Full Name] |
-| **Date** | [Submission Date] |
+| **Submitted by** | Sounak Dutta |
 | **Tool** | OpenClaw (macOS) / n8n-compatible |
 
 ---
